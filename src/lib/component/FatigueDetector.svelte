@@ -151,7 +151,9 @@
         eyesClosed: 'medium',
         headDown: 'low',
         yawning: 'medium',
-        noFaceDetected: 'low'
+        noFaceDetected: 'low',
+        lookingAway: 'medium', // Added
+        headTilted: 'low' // Added
       },
       driving_distraction: {
         drowsiness: 'critical',
@@ -159,7 +161,8 @@
         headDown: 'high',
         yawning: 'high',
         lookingAway: 'high',
-        noFaceDetected: 'medium'
+        noFaceDetected: 'medium',
+        headTilted: 'medium' // Added
       },
       attention_monitoring: {
         drowsiness: 'high',
@@ -167,7 +170,8 @@
         headDown: 'medium',
         yawning: 'low',
         lookingAway: 'medium',
-        noFaceDetected: 'high'
+        noFaceDetected: 'high',
+        headTilted: 'low' // Added
       },
       safety_compliance: {
         drowsiness: 'critical',
@@ -175,7 +179,8 @@
         headDown: 'medium',
         yawning: 'medium',
         lookingAway: 'high',
-        noFaceDetected: 'high'
+        noFaceDetected: 'high',
+        headTilted: 'medium' // Added
       }
     };
     

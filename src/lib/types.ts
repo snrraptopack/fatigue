@@ -4,8 +4,8 @@ export interface FatigueAlert {
   timestamp: number;
   driverName: string;
   vehicleId: string;
-  alertType: 'drowsiness' | 'distraction' | 'yawning' | 'eyesClosed';
-  severity: 'low' | 'medium' | 'high';
+  alertType: 'drowsiness' | 'distraction' | 'yawning' | 'eyesClosed' | 'headDown' | 'lookingAway' | 'headTilted' | 'noFaceDetected';
+  severity: 'low' | 'medium' | 'high' | 'critical';
   imageDataUrl?: string; // Optional screenshot as data URL
   location?: { lat: number; lng: number };
   synced: boolean;
