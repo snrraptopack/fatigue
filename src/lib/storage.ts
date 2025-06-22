@@ -135,7 +135,7 @@ export async function processSyncQueue(wsConnection: WebSocket | null = null) {
     for (const alert of queue) {
       try {
         // Try to sync via WebSocket first (faster)
-        if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+        if (wsConnection && wsConnection.readyState === 1) { // 1 = OPEN in WebSocket standard
           wsConnection.send(JSON.stringify({
             type: 'sync_alert',
             alert

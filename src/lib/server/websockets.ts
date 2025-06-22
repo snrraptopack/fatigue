@@ -1,16 +1,45 @@
 
-import { WebSocketServer, WebSocket } from 'ws';
+// Using Deno's native WebSocket
 import { connectDB } from './mongodb';
 
-// Enhanced driver info with streaming status
+// Clear hardcoded driver data from MongoDB on server start
+async function clearHardcodedDrivers() {
+    try {
+        const db = await connectDB();
+        const driversCollection = db.collection('drivers');
+
+        // List of hardcoded driver IDs to remove
+        const hardcodedDriverIds = [
+            'john-truck-001',
+            'maria-truck-002',
+            'david-forklift-003'
+        ];
+
+        // Remove hardcoded drivers
+        const result = await driversCollection.deleteMany({
+            driverId: { $in: hardcodedDriverIds }
+        });
+
+        console.log(`Cleared ${result.deletedCount} hardcoded drivers from MongoDB`);
+    } catch (error) {
+        console.error('Failed to clear hardcoded drivers:', error);
+    }
+}
+
+// Run cleanup on startup
+clearHardcodedDrivers();
+
+// Enhanced driver info with streaming and recording status
 interface DriverInfo {
     driverName: string;
     driverId: string;
     socket: WebSocket | any; // Using any to handle both ws and Deno WebSocket
     isStreaming: boolean;
+    isRecording: boolean;
     lastSeen: number;
     scenario: string;
     status: string;
+    vehicleId?: string;
 }
 
 // Store for the last frame from each driver for new admin connections
@@ -20,7 +49,7 @@ interface FrameCache {
 }
 
 const connectedDrivers = new Map<string, DriverInfo>();
-const adminClients = new Set<WebSocket>();
+const adminClients = new Set<any>(); // Using any to handle Deno WebSocket
 const frameCache = new Map<string, FrameCache>();
 
 // Broadcast driver list to all admin clients
@@ -36,7 +65,7 @@ function broadcastDrivers() {
     });
 
     adminClients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === 1) { // 1 = OPEN in WebSocket standard
             client.send(message);
         }
     });
@@ -64,7 +93,7 @@ function broadcastFrame(driverId: string, frame: string, timestamp: number) {
 
     // Only send to admins who are actively viewing this driver
     adminClients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === 1) { // 1 = OPEN in WebSocket standard
             // We could add a mechanism to track which driver each admin is viewing
             // For now, we'll send to all admins
             client.send(JSON.stringify({
@@ -84,21 +113,50 @@ async function updateDriverStatus(driverId: string, status: string) {
         const driversCollection = db.collection('drivers');
 
         const driver = connectedDrivers.get(driverId);
-        if (!driver) return;
+        if (!driver) {
+            console.error(`Cannot update status for unknown driver: ${driverId}`);
+            return;
+        }
 
-        await driversCollection.updateOne(
+        console.log(`Updating driver status in MongoDB: ${driver.driverName} (${driverId}) - ${status}`);
+
+        // Check if driver already exists in MongoDB
+        const existingDriver = await driversCollection.findOne({ driverId });
+        if (existingDriver) {
+            console.log(`Found existing driver in MongoDB: ${driver.driverName} (${driverId})`);
+        } else {
+            console.log(`Driver not found in MongoDB, will create new entry: ${driver.driverName} (${driverId})`);
+        }
+
+        // Update or insert driver document
+        const result = await driversCollection.updateOne(
             { driverId },
             { 
                 $set: { 
                     status,
                     lastSeen: new Date(),
                     name: driver.driverName,
-                    vehicleId: driver.driverId.split('-').pop() || driver.driverId,
+                    vehicleId: driver.vehicleId || driver.driverId.split('-').pop() || driver.driverId,
                     scenario: driver.scenario || 'workplace_fatigue'
                 }
             },
             { upsert: true }
         );
+
+        if (result.matchedCount > 0) {
+            console.log(`Driver status updated successfully: ${driver.driverName} (${driverId})`);
+        } else if (result.upsertedCount > 0) {
+            console.log(`New driver created in MongoDB: ${driver.driverName} (${driverId})`);
+        } else {
+            console.log(`No changes made to driver in MongoDB: ${driver.driverName} (${driverId})`);
+        }
+
+        // List all drivers in MongoDB for debugging
+        const allDrivers = await driversCollection.find({}).toArray();
+        console.log(`Total drivers in MongoDB: ${allDrivers.length}`);
+        allDrivers.forEach(d => {
+            console.log(`MongoDB driver: ${d.name} (${d.driverId}) - ${d.status}`);
+        });
     } catch (error) {
         console.error(`Failed to update driver status in MongoDB:`, error);
     }
@@ -235,6 +293,33 @@ function handleAdminMessage(ws: WebSocket, data: any) {
                 }
                 break;
 
+            case 'recording_status':
+                // Change recording status for a driver
+                if (data.driverId) {
+                    sendToDriver(data.driverId, {
+                        type: 'recording_status',
+                        active: data.active
+                    });
+
+                    // Update driver recording status
+                    const driver = connectedDrivers.get(data.driverId);
+                    if (driver) {
+                        driver.isRecording = data.active;
+
+                        // If recording is starting, ensure streaming is active
+                        if (data.active && !driver.isStreaming) {
+                            driver.isStreaming = true;
+                            sendToDriver(data.driverId, {
+                                type: 'stream_request',
+                                active: true
+                            });
+                        }
+
+                        broadcastDrivers();
+                    }
+                }
+                break;
+
             case 'scenario_change':
                 // Change scenario for a driver
                 if (data.driverId && data.scenario) {
@@ -267,6 +352,13 @@ function handleAdminMessage(ws: WebSocket, data: any) {
                 }
                 break;
 
+            case 'acknowledge_alert':
+                // Acknowledge an alert
+                if (data.alertId) {
+                    handleAlertAcknowledgement(data.alertId);
+                }
+                break;
+
             // Ping/pong is handled in the main message handler
 
             default:
@@ -277,11 +369,39 @@ function handleAdminMessage(ws: WebSocket, data: any) {
     }
 }
 
+// Handle alert acknowledgement
+async function handleAlertAcknowledgement(alertId: string) {
+    try {
+        const db = await connectDB();
+        const alertsCollection = db.collection('alerts');
+
+        // Update the alert in MongoDB
+        await alertsCollection.updateOne(
+            { id: alertId },
+            { $set: { acknowledged: true } }
+        );
+
+        console.log(`Alert ${alertId} acknowledged`);
+
+        // Broadcast the acknowledgement to all admin clients
+        adminClients.forEach(client => {
+            if (client.readyState === 1) { // 1 = OPEN in WebSocket standard
+                client.send(JSON.stringify({
+                    type: 'alert_acknowledged',
+                    alertId
+                }));
+            }
+        });
+    } catch (error) {
+        console.error('Failed to acknowledge alert:', error);
+    }
+}
+
 // Handle driver registration
 function handleDriverRegistration(socket: any, data: any) {
-    const { driverId, driverName } = data;
+    const { driverId, driverName, vehicleId } = data;
     if (driverId && driverName) {
-        console.log(`Registering driver: ${driverName} (${driverId})`);
+        console.log(`Registering driver: ${driverName} (${driverId}) with vehicle ${vehicleId || 'unknown'}`);
 
         // Check if driver is already registered
         const existingDriver = connectedDrivers.get(driverId);
@@ -294,6 +414,11 @@ function handleDriverRegistration(socket: any, data: any) {
             existingDriver.socket = socket;
             existingDriver.lastSeen = Date.now();
             existingDriver.status = 'active';
+
+            // Update vehicleId if provided
+            if (vehicleId) {
+                existingDriver.vehicleId = vehicleId;
+            }
 
             // Send current scenario to the reconnected driver
             if (socket.send) {
@@ -311,12 +436,15 @@ function handleDriverRegistration(socket: any, data: any) {
             connectedDrivers.set(driverId, { 
                 driverName, 
                 driverId, 
+                vehicleId: vehicleId || driverId.split('-').pop() || 'unknown',
                 socket,
                 isStreaming: false,
+                isRecording: false,
                 lastSeen: Date.now(),
                 scenario: 'workplace_fatigue',
                 status: 'active'
             });
+            console.log(`New driver ${driverName} (${driverId}) added to connected drivers map`);
         }
 
         // Update driver status in MongoDB
@@ -324,6 +452,9 @@ function handleDriverRegistration(socket: any, data: any) {
 
         // Broadcast updated driver list to all admin clients
         broadcastDrivers();
+        console.log(`Driver list broadcasted to ${adminClients.size} admin clients`);
+    } else {
+        console.error('Driver registration missing required data', data);
     }
 }
 
@@ -343,16 +474,44 @@ function handleVideoFrame(data: any) {
 }
 
 // Handle alert from driver
-function handleAlert(data: any) {
-    // Forward alert to admin clients
-    adminClients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-                type: 'alert',
-                data
-            }));
+async function handleAlert(data: any) {
+    try {
+        // Extract alert data
+        const alert = data.alert;
+        const driverId = data.driverId;
+
+        if (!alert || !driverId) {
+            console.error('Alert missing required data', data);
+            return;
         }
-    });
+
+        // Update driver status in MongoDB
+        const driver = connectedDrivers.get(driverId);
+        if (driver) {
+            driver.lastSeen = Date.now();
+            driver.status = alert.severity === 'critical' ? 'critical' : 'alert';
+
+            // Update driver status in MongoDB
+            await updateDriverStatus(driverId, driver.status);
+
+            // Broadcast updated driver list to all admin clients
+            broadcastDrivers();
+        } else {
+            console.log(`Alert received from unknown driver: ${driverId}`);
+        }
+
+        // Forward alert to admin clients
+        adminClients.forEach(client => {
+            if (client.readyState === 1) { // 1 = OPEN in WebSocket standard
+                client.send(JSON.stringify({
+                    type: 'alert',
+                    data: alert
+                }));
+            }
+        });
+    } catch (error) {
+        console.error('Error handling alert:', error);
+    }
 }
 
 // Handle sync alert from driver (for offline data synchronization)
@@ -364,6 +523,9 @@ async function handleSyncAlert(data: any) {
         }
 
         const alert = data.alert;
+        const driverId = data.driverId;
+
+        console.log(`Processing sync alert from driver ${driverId || 'unknown'}: ${alert.alertType} (${alert.severity})`);
 
         // Save alert to MongoDB
         const db = await connectDB();
@@ -378,24 +540,50 @@ async function handleSyncAlert(data: any) {
                 { id: alert.id },
                 { $set: { ...alert, synced: true } }
             );
+            console.log(`Updated existing alert in MongoDB: ${alert.id}`);
         } else {
             // Insert new alert
             await alertsCollection.insertOne({
                 ...alert,
                 synced: true
             });
+            console.log(`Inserted new alert into MongoDB: ${alert.id}`);
         }
 
         // Update driver status
-        const driverId = `${alert.driverName.toLowerCase().replace(' ', '-')}-${alert.vehicleId.toLowerCase()}`;
-        await updateDriverStatus(
-            driverId, 
-            alert.severity === 'critical' ? 'critical' : 'alert'
-        );
+        if (driverId) {
+            // If we have a driverId from the message, use it
+            const driver = connectedDrivers.get(driverId);
+            if (driver) {
+                driver.lastSeen = Date.now();
+                driver.status = alert.severity === 'critical' ? 'critical' : 'alert';
+                await updateDriverStatus(driverId, driver.status);
+                broadcastDrivers();
+            } else {
+                // If driver not found in connectedDrivers, try to create a new entry
+                const uniqueDriverId = `${alert.driverName.toLowerCase().replace(/\s+/g, '-')}-${alert.vehicleId.toLowerCase()}`;
+                console.log(`Driver not found in connected drivers. Creating entry with ID: ${uniqueDriverId}`);
+
+                // Create a placeholder driver entry (without socket)
+                connectedDrivers.set(uniqueDriverId, {
+                    driverName: alert.driverName,
+                    driverId: uniqueDriverId,
+                    vehicleId: alert.vehicleId,
+                    isStreaming: false,
+                    lastSeen: Date.now(),
+                    scenario: 'workplace_fatigue',
+                    status: alert.severity === 'critical' ? 'critical' : 'alert',
+                    socket: null
+                });
+
+                await updateDriverStatus(uniqueDriverId, alert.severity === 'critical' ? 'critical' : 'alert');
+                broadcastDrivers();
+            }
+        }
 
         // Forward alert to admin clients
         adminClients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
+            if (client.readyState === 1) { // 1 = OPEN in WebSocket standard
                 client.send(JSON.stringify({
                     type: 'alert',
                     data: alert
@@ -403,19 +591,22 @@ async function handleSyncAlert(data: any) {
             }
         });
 
-        // Send confirmation back to driver
-        const driver = Array.from(connectedDrivers.values())
-            .find(d => d.driverName === alert.driverName && d.driverId.includes(alert.vehicleId));
-
-        if (driver && driver.socket) {
-            try {
-                driver.socket.send(JSON.stringify({
-                    type: 'sync_confirmation',
-                    alertId: alert.id,
-                    success: true
-                }));
-            } catch (error) {
-                console.error('Failed to send sync confirmation:', error);
+        // Send confirmation back to driver if we have a driverId and the driver is connected
+        if (driverId) {
+            const driver = connectedDrivers.get(driverId);
+            if (driver && driver.socket) {
+                try {
+                    driver.socket.send(JSON.stringify({
+                        type: 'sync_confirmation',
+                        alertId: alert.id,
+                        success: true
+                    }));
+                    console.log(`Sent sync confirmation to driver ${driverId} for alert ${alert.id}`);
+                } catch (error) {
+                    console.error(`Failed to send sync confirmation to driver ${driverId}:`, error);
+                }
+            } else {
+                console.log(`Cannot send sync confirmation: Driver ${driverId} not connected`);
             }
         }
     } catch (error) {
@@ -468,17 +659,26 @@ const heartbeatInterval = setInterval(() => {
     adminClients.forEach(ws => {
         if ((ws as any).isAlive === false) {
             console.log('Terminating dead admin connection');
-            ws.terminate();
+            try {
+                ws.close();
+            } catch (e) {
+                console.error('Error closing connection:', e);
+            }
             adminClients.delete(ws);
             return;
         }
 
         (ws as any).isAlive = false;
         try {
-            ws.ping();
+            // Deno WebSocket doesn't have ping method, send a ping message instead
+            ws.send(JSON.stringify({ type: 'ping' }));
         } catch (e) {
             console.error('Error sending ping:', e);
-            ws.terminate();
+            try {
+                ws.close();
+            } catch (e) {
+                console.error('Error closing connection:', e);
+            }
             adminClients.delete(ws);
         }
     });

@@ -5,9 +5,10 @@
   import type { FatigueAlert } from '$lib/storage';
   import AdminSnapshotGallery from '$lib/component/AdminSnapshotGallery.svelte';
 
-  // Real-time alerts store
+  // Real-time stores
   const liveAlerts = writable<FatigueAlert[]>([]);
   const driverStatuses = writable<Record<string, any>>({});
+  const liveFrames = writable<Record<string, {frame: string, timestamp: number}>>({});
 
   let alerts: FatigueAlert[] = [];
   let drivers: Record<string, any> = {};
@@ -18,11 +19,13 @@
   let filterDriverName: string = '';
   let sortBy: 'timestamp' | 'severity' | 'driver' = 'timestamp';
   let isConnected = false;
-  let eventSource: EventSource | null = null;
+  let alertEventSource: EventSource | null = null;
+  let frameEventSource: EventSource | null = null;
   let wsConnection: WebSocket | null = null;
   let wsConnected = false;
   let currentVideoFrame: { driverId: string, frame: string, timestamp: number } | null = null;
   let streamRequested = false;
+  let isRecording = false;
 
   // Auto-refresh and connection management
   let refreshInterval: number;
@@ -77,44 +80,145 @@
 
   onDestroy(() => {
     if (browser) {
-      if (eventSource) {
-        eventSource.close();
+      // Close SSE connections
+      if (alertEventSource) {
+        alertEventSource.close();
+        alertEventSource = null;
       }
+      if (frameEventSource) {
+        frameEventSource.close();
+        frameEventSource = null;
+      }
+
+      // Close WebSocket connection
       if (wsConnection) {
         wsConnection.close();
+        wsConnection = null;
       }
-      if (refreshInterval) clearInterval(refreshInterval);
-      if (connectionCheckInterval) clearInterval(connectionCheckInterval);
-      if (pingInterval) clearInterval(pingInterval);
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+
+      // Clear intervals and timeouts
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = undefined;
+      }
+      if (connectionCheckInterval) {
+        clearInterval(connectionCheckInterval);
+        connectionCheckInterval = undefined;
+      }
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = undefined;
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = undefined;
+      }
+
+      // Reset state
+      isConnected = false;
+      wsConnected = false;
+      streamRequested = false;
+      isRecording = false;
     }
   });
 
   async function initializeRealTimeConnection() {
     try {
-      eventSource = new EventSource('/api/admin/live-alerts');
+      // Initialize alerts SSE connection
+      alertEventSource = new EventSource('/api/admin/live-alerts');
 
-      eventSource.onopen = () => {
+      alertEventSource.onopen = () => {
         isConnected = true;
-        console.log('SSE connection established');
+        console.log('Alerts SSE connection established');
       };
 
-      eventSource.onmessage = (event) => {
+      alertEventSource.onmessage = (event) => {
         const eventData = JSON.parse(event.data);
         if (eventData.type === 'alert' && eventData.data) {
           handleNewAlert(eventData.data);
         } else if (eventData.type === 'heartbeat') {
-          console.log('Heartbeat received');
+          console.log('Alerts heartbeat received');
         }
       };
 
-      eventSource.onerror = () => {
+      alertEventSource.onerror = () => {
         isConnected = false;
-        console.log('SSE connection lost, attempting to reconnect...');
+        console.log('Alerts SSE connection lost, attempting to reconnect...');
+      };
+
+      // Initialize frames SSE connection
+      initializeFramesConnection();
+
+    } catch (error) {
+      console.error('Failed to establish SSE connections:', error);
+      isConnected = false;
+    }
+  }
+
+  function initializeFramesConnection(driverId?: string) {
+    try {
+      // Close existing connection if any
+      if (frameEventSource) {
+        frameEventSource.close();
+      }
+
+      // Create URL with optional driverId parameter
+      const url = driverId 
+        ? `/api/admin/live-frames?driverId=${encodeURIComponent(driverId)}`
+        : '/api/admin/live-frames';
+
+      frameEventSource = new EventSource(url);
+
+      frameEventSource.onopen = () => {
+        console.log('Frames SSE connection established');
+      };
+
+      frameEventSource.onmessage = (event) => {
+        const eventData = JSON.parse(event.data);
+        if (eventData.type === 'frame' && eventData.data) {
+          handleNewFrame(eventData.data);
+        } else if (eventData.type === 'heartbeat') {
+          console.log('Frames heartbeat received');
+        }
+      };
+
+      frameEventSource.onerror = () => {
+        console.log('Frames SSE connection lost, attempting to reconnect...');
+        // Try to reconnect after a short delay
+        setTimeout(() => {
+          if (browser) {
+            initializeFramesConnection(driverId);
+          }
+        }, 3000);
       };
     } catch (error) {
-      console.error('Failed to establish SSE connection:', error);
-      isConnected = false;
+      console.error('Failed to establish frames SSE connection:', error);
+    }
+  }
+
+  function handleNewFrame(frameData: { driverId: string, frame: string, timestamp: number }) {
+    // Update the liveFrames store with the new frame
+    liveFrames.update(frames => {
+      return {
+        ...frames,
+        [frameData.driverId]: {
+          frame: frameData.frame,
+          timestamp: frameData.timestamp
+        }
+      };
+    });
+
+    // If this is the selected driver, update currentVideoFrame
+    if (selectedDriver === frameData.driverId) {
+      currentVideoFrame = frameData;
+
+      // Update the UI if element exists
+      if (browser) {
+        const imgElement = document.getElementById('driver-stream') as HTMLImageElement;
+        if (imgElement) {
+          imgElement.src = frameData.frame;
+        }
+      }
     }
   }
 
@@ -130,21 +234,19 @@
         wsConnection.close();
       }
 
-      // Create a new WebSocket connection with admin role header
+      // Create a new WebSocket connection
       wsConnection = new WebSocket(wsUrl);
 
-      // Add admin role header (this will be available in the request object on the server)
-      wsConnection.addEventListener('open', () => {
+      wsConnection.onopen = () => {
+        wsConnected = true;
+        console.log('WebSocket connection established');
+
         // Send a message to identify as admin
         wsConnection?.send(JSON.stringify({
           type: 'identify',
           role: 'admin'
         }));
-      });
-
-      wsConnection.onopen = () => {
-        wsConnected = true;
-        console.log('WebSocket connection established');
+        console.log('Sent identify message to server');
 
         // Start ping interval to keep connection alive
         startPingInterval();
@@ -243,7 +345,7 @@
   }
 
   function requestDriverStream(driverId: string, active: boolean) {
-    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+    if (!wsConnection || wsConnection.readyState !== 1) { // 1 = OPEN in WebSocket standard
       console.error('WebSocket not connected');
       return;
     }
@@ -259,17 +361,46 @@
     // If we're turning off streaming, clear the current frame
     if (!active) {
       currentVideoFrame = null;
+
+      // Also stop recording if it's active
+      if (isRecording) {
+        toggleRecording(driverId, false);
+      }
     } else {
       // Request the latest frame if available
       wsConnection.send(JSON.stringify({
         type: 'get_frame',
         driverId
       }));
+
+      // Initialize frames connection for this specific driver
+      initializeFramesConnection(driverId);
+    }
+  }
+
+  function toggleRecording(driverId: string, active: boolean) {
+    isRecording = active;
+
+    if (active) {
+      console.log(`Starting recording for driver ${driverId}`);
+      // We're already receiving frames via SSE, just need to store them
+      // This is handled by the handleNewFrame function
+    } else {
+      console.log(`Stopping recording for driver ${driverId}`);
+    }
+
+    // Notify the server about recording status change
+    if (wsConnection && wsConnection.readyState === 1) { // 1 = OPEN in WebSocket standard
+      wsConnection.send(JSON.stringify({
+        type: 'recording_status',
+        driverId,
+        active
+      }));
     }
   }
 
   function changeDriverScenario(driverId: string, scenario: string) {
-    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+    if (!wsConnection || wsConnection.readyState !== 1) { // 1 = OPEN in WebSocket standard
       console.error('WebSocket not connected');
       return;
     }
@@ -310,7 +441,9 @@
     try {
       const alertsResponse = await fetch('/api/admin/alerts');
       if (alertsResponse.ok) {
-        alerts = await alertsResponse.json();
+        const data = await alertsResponse.json();
+        // Extract the alerts array from the response
+        alerts = data.alerts || [];
         liveAlerts.set(alerts);
       }
 
@@ -643,11 +776,18 @@
                        driver.status === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}">
                   {driver.status}
                 </span>
-                {#if driver.isStreaming}
-                  <span class="text-xs font-medium px-2 py-1 rounded-full bg-purple-500/20 text-purple-300">
-                    Streaming
-                  </span>
-                {/if}
+                <div class="flex flex-col gap-1">
+                  {#if driver.isStreaming}
+                    <span class="text-xs font-medium px-2 py-1 rounded-full bg-purple-500/20 text-purple-300">
+                      Streaming
+                    </span>
+                  {/if}
+                  {#if driver.isRecording}
+                    <span class="text-xs font-medium px-2 py-1 rounded-full bg-red-500/20 text-red-300 animate-pulse">
+                      Recording
+                    </span>
+                  {/if}
+                </div>
               </div>
             </div>
             <div class="flex justify-between items-center mt-4 text-sm">
@@ -704,11 +844,18 @@
               <span class="text-sm font-medium px-2.5 py-1 rounded-full bg-blue-500/20 text-blue-300">
                 {drivers[selectedDriver].scenario?.replace(/_/g, ' ') || 'workplace fatigue'}
               </span>
-              {#if streamRequested}
-                <span class="text-sm font-medium px-2.5 py-1 rounded-full bg-purple-500/20 text-purple-300 animate-pulse">
-                  Live Stream
-                </span>
-              {/if}
+              <div class="flex items-center gap-2">
+                {#if streamRequested}
+                  <span class="text-sm font-medium px-2.5 py-1 rounded-full bg-purple-500/20 text-purple-300 animate-pulse">
+                    Live Stream
+                  </span>
+                {/if}
+                {#if isRecording}
+                  <span class="text-sm font-medium px-2.5 py-1 rounded-full bg-red-500/20 text-red-300 animate-pulse">
+                    Recording
+                  </span>
+                {/if}
+              </div>
             </div>
           </div>
 
@@ -756,6 +903,16 @@
                 <option value={option.value}>{option.label}</option>
               {/each}
             </select>
+
+            {#if streamRequested}
+              <button 
+                class="text-white font-medium py-2 px-4 rounded-lg transition-colors col-span-2
+                      {isRecording ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}"
+                on:click={() => toggleRecording(selectedDriver, !isRecording)}
+              >
+                {isRecording ? '⏹️ Stop Recording' : '🔴 Start Recording'}
+              </button>
+            {/if}
           </div>
 
           <!-- Driver Snapshots -->

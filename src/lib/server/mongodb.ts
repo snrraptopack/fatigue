@@ -17,10 +17,10 @@ export async function connectDB(): Promise<Db> {
     }
 
     db = client.db(MONGODB_DB_NAME || 'fatigue-detection');
-    
+
     // Create indexes for better performance
     await createIndexes(db);
-    
+
     return db;
   } catch (error) {
     console.error('Failed to connect to MongoDB:', error);
@@ -32,6 +32,7 @@ async function createIndexes(database: Db) {
   try {
     const alertsCollection = database.collection('alerts');
     const driversCollection = database.collection('drivers');
+    const recordingsCollection = database.collection('recordings');
 
     // Create indexes for alerts collection
     await alertsCollection.createIndex({ timestamp: -1 });
@@ -44,6 +45,11 @@ async function createIndexes(database: Db) {
     await driversCollection.createIndex({ driverId: 1 }, { unique: true });
     await driversCollection.createIndex({ lastSeen: -1 });
     await driversCollection.createIndex({ status: 1 });
+
+    // Create indexes for recordings collection
+    await recordingsCollection.createIndex({ driverId: 1, timestamp: -1 });
+    await recordingsCollection.createIndex({ timestamp: -1 });
+    await recordingsCollection.createIndex({ alertId: 1 }, { sparse: true });
 
     console.log('Database indexes created successfully');
   } catch (error) {
