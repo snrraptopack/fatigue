@@ -4,6 +4,7 @@
   import { writable } from 'svelte/store';
   import type { FatigueAlert } from '$lib/storage';
   import AdminSnapshotGallery from '$lib/component/AdminSnapshotGallery.svelte';
+  import { setActiveWebSocketConnection } from '$lib/network';
 
   // Real-time stores
   const liveAlerts = writable<FatigueAlert[]>([]);
@@ -28,11 +29,11 @@
   let isRecording = false;
 
   // Auto-refresh and connection management
-  let refreshInterval: number;
-  let connectionCheckInterval: number;
-  let pingInterval: number;
-  let reconnectTimeout: number;
-  let reconnectAttempts = 0;
+  let refreshInterval: number|undefined;
+  let connectionCheckInterval: number|undefined;
+  let pingInterval: number|undefined ;
+  let reconnectTimeout: number|undefined;
+  let reconnectAttempts:number|undefined = 0;
 
   // Scenario options
   const scenarioOptions = [
@@ -250,6 +251,9 @@
 
         // Start ping interval to keep connection alive
         startPingInterval();
+
+        // Register the connection with the network module
+        setActiveWebSocketConnection(wsConnection);
       };
 
       wsConnection.onclose = (event) => {
@@ -259,8 +263,10 @@
         // Stop ping interval
         stopPingInterval();
 
-        // Try to reconnect after a delay that increases with each attempt
-        // to avoid overwhelming the server if it's down
+        // Update the network module
+        setActiveWebSocketConnection(null);
+
+        
         const delay = Math.min(30000, 1000 * Math.pow(1.5, reconnectAttempts));
         reconnectAttempts++;
         console.log(`Attempting to reconnect in ${delay}ms (attempt ${reconnectAttempts})`);

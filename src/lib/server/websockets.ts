@@ -1,5 +1,4 @@
 
-// Using Deno's native WebSocket
 import { connectDB } from './mongodb';
 
 // Clear hardcoded driver data from MongoDB on server start
@@ -573,7 +572,8 @@ async function handleSyncAlert(data: any) {
                     lastSeen: Date.now(),
                     scenario: 'workplace_fatigue',
                     status: alert.severity === 'critical' ? 'critical' : 'alert',
-                    socket: null
+                    socket: null,
+                    isRecording:false
                 });
 
                 await updateDriverStatus(uniqueDriverId, alert.severity === 'critical' ? 'critical' : 'alert');
