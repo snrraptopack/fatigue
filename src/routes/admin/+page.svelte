@@ -1,15 +1,27 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { browser } from '$app/environment';
-  import { writable } from 'svelte/store';
+  import { writable, derived } from 'svelte/store';
   import type { FatigueAlert } from '$lib/storage';
   import AdminSnapshotGallery from '$lib/component/AdminSnapshotGallery.svelte';
   import { setActiveWebSocketConnection } from '$lib/network';
+  import { syncStatus, processSyncQueue, getUnsyncedAlerts } from '$lib/storage';
 
   // Real-time stores
   const liveAlerts = writable<FatigueAlert[]>([]);
   const driverStatuses = writable<Record<string, any>>({});
   const liveFrames = writable<Record<string, {frame: string, timestamp: number}>>({});
+
+  // Derived store for sorted drivers (recent first)
+  const sortedDrivers = derived(driverStatuses, ($driverStatuses) => {
+    const drivers = Object.entries($driverStatuses);
+    return drivers.sort(([, a], [, b]) => {
+      // Sort by lastSeen timestamp (recent first)
+      const aTime = a.lastSeen || 0;
+      const bTime = b.lastSeen || 0;
+      return bTime - aTime;
+    });
+  });
 
   let alerts: FatigueAlert[] = [];
   let drivers: Record<string, any> = {};
@@ -596,7 +608,7 @@
   }
 
   function getFilteredDrivers() {
-    const driverList = Object.values(drivers);
+    const driverList = sortedDrivers.map(([driverId, driver]) => ({ driverId, ...driver }));
     if (filterDriverName.trim() === '') {
       return driverList;
     }
@@ -660,6 +672,24 @@
 
   function closeAlertDetails() {
     selectedAlert = null;
+  }
+
+  async function manualSync() {
+    try {
+      const response = await fetch('/api/admin/sync', {
+        method: 'POST'
+      });
+      
+      if (response.ok) {
+        console.log('Manual sync triggered successfully');
+        // Refresh data after sync
+        await loadAlertsAndDrivers();
+      } else {
+        console.error('Manual sync failed');
+      }
+    } catch (error) {
+      console.error('Error triggering manual sync:', error);
+    }
   }
 </script>
 
@@ -739,6 +769,10 @@
         </div>
       </div>
 
+      <button class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors" on:click={manualSync}>
+        🔄 Manual Sync
+      </button>
+
       <button class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg transition-colors" on:click={loadAlertsAndDrivers}>
         🔄 Refresh
       </button>
@@ -754,11 +788,18 @@
         <div class="flex items-center gap-2">
           <div class="w-3 h-3 rounded-full {wsConnected ? 'bg-green-400' : 'bg-red-500'}"></div>
           <span class="text-sm font-medium text-gray-400">{wsConnected ? 'WS Connected' : 'WS Disconnected'}</span>
+          <!-- Sync Status Indicator -->
+          <div class="flex items-center gap-1 ml-4">
+            <div class="w-2 h-2 rounded-full {$syncStatus.isSyncing ? 'bg-yellow-400 animate-pulse' : 'bg-green-400'}"></div>
+            <span class="text-xs text-gray-400">
+              {$syncStatus.pendingCount > 0 ? `${$syncStatus.pendingCount} pending` : 'Synced'}
+            </span>
+          </div>
         </div>
       </div>
 
       <div class="space-y-4">
-        {#each Object.entries(drivers) as [driverId, driver] (driverId)}
+        {#each $sortedDrivers as [driverId, driver] (driverId)}
           <div 
             class="bg-gray-800 rounded-lg p-4 shadow-md border-l-4 cursor-pointer transition-all hover:bg-gray-700/80 
                   {driver.status === 'critical' ? 'border-red-500' : 
@@ -774,6 +815,13 @@
               <div>
                 <h3 class="font-bold text-lg text-white">{driver.name}</h3>
                 <p class="text-sm text-gray-400">{driver.vehicleId}</p>
+                <!-- Sync indicator for this driver -->
+                {#if driver.unsyncedAlerts && driver.unsyncedAlerts > 0}
+                  <div class="flex items-center gap-1 mt-1">
+                    <div class="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></div>
+                    <span class="text-xs text-yellow-400">{driver.unsyncedAlerts} unsynced</span>
+                  </div>
+                {/if}
               </div>
               <div class="text-right flex flex-col items-end gap-2">
                 <span class="text-sm font-semibold uppercase px-2 py-1 rounded-full 
@@ -827,7 +875,7 @@
           </div>
         {/each}
 
-        {#if Object.keys(drivers).length === 0}
+        {#if $sortedDrivers.length === 0}
           <div class="text-center py-8 px-4 bg-gray-800 rounded-lg">
             <div class="text-4xl mb-3">🚗</div>
             <h3 class="text-lg font-semibold text-white">No Drivers Connected</h3>

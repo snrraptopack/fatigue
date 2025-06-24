@@ -5,7 +5,7 @@
   import { addAlert } from '$lib/storage';
   import { v4 as uuidv4 } from 'uuid';
   import type { FatigueAlert } from '$lib/storage';
-    export let driverName = '';
+  export let driverName = '';
   export let vehicleId = '';
   export let scenario: 'workplace_fatigue' | 'driving_distraction' | 'attention_monitoring' | 'safety_compliance' = 'workplace_fatigue';
 
@@ -34,6 +34,27 @@
   let lastFrameSent = 0;
   let driverId = '';
 
+  // Detection thresholds - optimized for TinyFaceDetector
+  const EYE_CLOSED_THRESHOLD = 0.18; // Slightly higher threshold to reduce false positives
+  const DROWSINESS_THRESHOLD = 2000; // 2 seconds with eyes closed (increased for better accuracy)
+  const HEAD_DOWN_THRESHOLD = 1500; // 1.5 seconds looking down
+  const LOOKING_AWAY_THRESHOLD = 2500; // 2.5 seconds looking away
+  const NO_FACE_THRESHOLD = 4000; // 4 seconds without face detection
+  const YAWN_COOLDOWN = 5000; // 5 seconds between yawn detections (increased to reduce false positives)
+  const HEAD_DOWN_COOLDOWN = 6000; // 6 seconds between head down detections
+
+  // Head pose thresholds (in degrees) - more conservative
+  const HEAD_DOWN_PITCH_THRESHOLD = 20; // Less sensitive looking down threshold
+  const HEAD_UP_PITCH_THRESHOLD = -15; // Looking up threshold
+  const HEAD_TILT_ROLL_THRESHOLD = 30; // Less sensitive head tilt threshold
+  const LOOKING_AWAY_YAW_THRESHOLD = 30; // Less sensitive looking left/right threshold
+
+  // Human presence detection
+  let humanPresenceDetected = false;
+  let lastHumanDetectionTime = 0;
+  let humanPresenceThreshold = 1000; // 1 second to confirm human presence
+  let noHumanThreshold = 2000; // 2 seconds to confirm no human
+
   // Function to handle form submission
   function handleFormSubmit() {
     if (!tempDriverName.trim()) {
@@ -51,10 +72,8 @@
     vehicleId = tempVehicleId;
     driverId = `${driverName.toLowerCase().replace(/\s+/g, '-')}-${vehicleId.toLowerCase()}`;
 
-    // Close the modal
     showModal = false;
 
-    // Initialize the system
     initializeSystem();
   }
 
@@ -78,22 +97,8 @@
       }
     }
   }
-    // Detection thresholds - optimized for TinyFaceDetector
-  const EYE_CLOSED_THRESHOLD = 0.15; // Lower threshold for better eye closure detection
-  const DROWSINESS_THRESHOLD = 1500; // 1.5 seconds with eyes closed
-  const HEAD_DOWN_THRESHOLD = 1000; // 1 second looking down
-  const LOOKING_AWAY_THRESHOLD = 2000; // 2 seconds looking away
-  const NO_FACE_THRESHOLD = 3000; // 3 seconds without face detection (reduced for TinyFace)
-  const YAWN_COOLDOWN = 3000; // 3 seconds between yawn detections
-  const HEAD_DOWN_COOLDOWN = 4000; // 4 seconds between head down detections
 
-  // Head pose thresholds (in degrees) - more sensitive
-  const HEAD_DOWN_PITCH_THRESHOLD = 15; // More sensitive looking down threshold
-  const HEAD_UP_PITCH_THRESHOLD = -10; // Looking up threshold
-  const HEAD_TILT_ROLL_THRESHOLD = 25; // More sensitive head tilt threshold
-  const LOOKING_AWAY_YAW_THRESHOLD = 25; // More sensitive looking left/right threshold
-
- async function loadModels(): Promise<void> {
+  async function loadModels(): Promise<void> {
     if (!browser) return;
 
     try {
@@ -101,7 +106,7 @@
 
       // Use the base URL for the models
       const modelPath = '/models';
-        console.log(`Loading models from ${modelPath}`);      await faceapi.nets.tinyFaceDetector.load(modelPath);
+      console.log(`Loading models from ${modelPath}`);      await faceapi.nets.tinyFaceDetector.load(modelPath);
       console.log('Tiny Face Detector model loaded');
 
       await faceapi.nets.faceLandmark68Net.load(modelPath);
@@ -248,16 +253,19 @@
         drowsiness: 'high',
         eyesClosed: 'medium',
         headDown: 'low',
-        yawning: 'medium',
-        noFaceDetected: 'low'
+        yawning: 'low',
+        lookingAway: 'medium',
+        noFaceDetected: 'low',
+        distraction: 'medium'
       },
       driving_distraction: {
         drowsiness: 'critical',
         eyesClosed: 'critical',
         headDown: 'high',
-        yawning: 'high',
+        yawning: 'medium',
         lookingAway: 'high',
-        noFaceDetected: 'medium'
+        noFaceDetected: 'medium',
+        distraction: 'high'
       },
       attention_monitoring: {
         drowsiness: 'high',
@@ -265,15 +273,17 @@
         headDown: 'medium',
         yawning: 'low',
         lookingAway: 'medium',
-        noFaceDetected: 'high'
+        noFaceDetected: 'high',
+        distraction: 'medium'
       },
       safety_compliance: {
         drowsiness: 'critical',
         eyesClosed: 'high',
         headDown: 'medium',
-        yawning: 'medium',
+        yawning: 'low',
         lookingAway: 'high',
-        noFaceDetected: 'high'
+        noFaceDetected: 'high',
+        distraction: 'high'
       }
     };
 
@@ -416,6 +426,16 @@
         isFaceDetected = true;
         noFaceDetectedDuration = 0; // Reset no face duration
 
+        // Update human presence detection
+        if (!humanPresenceDetected) {
+          if (lastHumanDetectionTime === 0) {
+            lastHumanDetectionTime = currentTime;
+          } else if (currentTime - lastHumanDetectionTime > humanPresenceThreshold) {
+            humanPresenceDetected = true;
+            console.log('Human presence confirmed');
+          }
+        }
+
         const detection = resizedDetections[0];
         const landmarks = detection.landmarks;
         const expressions = detection.expressions;
@@ -428,7 +448,8 @@
         // Calculate metrics
         const ear = calculateEAR(landmarks);
         const headPose = calculateHeadPose(landmarks);
-          // 1. EYES CLOSED DETECTION - Enhanced
+
+        // 1. EYES CLOSED DETECTION - Enhanced
         if (ear < EYE_CLOSED_THRESHOLD) {
           if (eyeClosedDuration === 0) {
             eyeClosedDuration = currentTime;
@@ -436,7 +457,7 @@
             const eyesClosedTime = currentTime - eyeClosedDuration;
 
             // Immediate eyes closed alert (for workplace monitoring)
-            if (eyesClosedTime > 300 && scenario === 'workplace_fatigue') {
+            if (eyesClosedTime > 500 && scenario === 'workplace_fatigue') {
               await createAlert('eyesClosed', confidence, eyesClosedTime);
               eyeClosedDuration = currentTime; // Reset to avoid spam
             }
@@ -473,13 +494,13 @@
           await createAlert('headTilted', confidence, 0);
         }
 
-        // 3. LOOKING AWAY DETECTION
-        if (Math.abs(headPose.yaw) > LOOKING_AWAY_YAW_THRESHOLD) {
+        // 3. LOOKING AWAY DETECTION - Only if human is present
+        if (humanPresenceDetected && Math.abs(headPose.yaw) > LOOKING_AWAY_YAW_THRESHOLD) {
           if (lookingAwayDuration === 0) {
             lookingAwayDuration = currentTime;
           } else if (currentTime - lookingAwayDuration > LOOKING_AWAY_THRESHOLD) {
             await createAlert('lookingAway', confidence, currentTime - lookingAwayDuration);
-            lookingAwayDuration = 0; // Reset after alert
+            lookingAwayDuration = 0;
           }
         } else {
           lookingAwayDuration = 0;
@@ -490,23 +511,31 @@
           await createAlert('headTilted', confidence, 0);
         }
 
-        // 5. YAWNING DETECTION
-        // Enhanced yawning detection using multiple expression indicators
-        const mouthOpen = expressions.surprised > 0.6 || expressions.fearful > 0.4;
-        const eyesPartiallyOpen = ear > EYE_CLOSED_THRESHOLD && ear < 0.3;
+        // 5. YAWNING DETECTION - Improved algorithm
+        // More sophisticated yawning detection using multiple indicators
+        const mouthOpenness = expressions.surprised + expressions.fearful;
+        const eyesPartiallyOpen = ear > EYE_CLOSED_THRESHOLD && ear < 0.25;
+        const neutralExpression = expressions.neutral;
+        
+        // Yawning is characterized by open mouth, partially closed eyes, and reduced neutral expression
+        const isYawning = mouthOpenness > 0.7 && 
+                         eyesPartiallyOpen && 
+                         neutralExpression < 0.4 &&
+                         currentTime - lastYawnTime > YAWN_COOLDOWN;
 
-        if (mouthOpen && eyesPartiallyOpen && currentTime - lastYawnTime > YAWN_COOLDOWN) {
+        if (isYawning) {
           await createAlert('yawning', confidence, 0);
           lastYawnTime = currentTime;
         }
 
-        // 6. DISTRACTION DETECTION (composite)
-        if (expressions.neutral < 0.3 && Math.abs(headPose.yaw) > 20) {
+        // 6. DISTRACTION DETECTION (composite) - Only if human is present
+        if (humanPresenceDetected && expressions.neutral < 0.3 && Math.abs(headPose.yaw) > 20) {
           await createAlert('distraction', confidence, 0);
         }
-          // Draw head pose information on canvas with better debugging
+
+        // Draw head pose information on canvas with better debugging
         context.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        context.fillRect(10, 10, 250, 130);
+        context.fillRect(10, 10, 280, 150);
         context.fillStyle = 'white';
         context.font = '12px Arial';
         context.fillText(`Pitch: ${headPose.pitch.toFixed(1)}° (${headPose.pitch > HEAD_DOWN_PITCH_THRESHOLD ? 'DOWN' : headPose.pitch < HEAD_UP_PITCH_THRESHOLD ? 'UP' : 'OK'})`, 15, 25);
@@ -515,17 +544,32 @@
         context.fillText(`EAR: ${ear.toFixed(3)} (${ear < EYE_CLOSED_THRESHOLD ? 'CLOSED' : 'OPEN'})`, 15, 70);
         context.fillText(`Confidence: ${(confidence * 100).toFixed(1)}%`, 15, 85);
         context.fillText(`Scenario: ${scenario}`, 15, 100);
-        context.fillText(`Detection: TinyFace`, 15, 115);
-        context.fillText(`FPS: ~${Math.round(1000 / 100)}`, 15, 130);
+        context.fillText(`Human: ${humanPresenceDetected ? 'PRESENT' : 'DETECTING'}`, 15, 115);
+        context.fillText(`Mouth: ${mouthOpenness.toFixed(2)}`, 15, 130);
+        context.fillText(`Neutral: ${neutralExpression.toFixed(2)}`, 15, 145);
 
       } else {
         // NO FACE DETECTED
         isFaceDetected = false;
 
+        // Update human presence detection
+        if (humanPresenceDetected) {
+          if (lastHumanDetectionTime === 0) {
+            lastHumanDetectionTime = currentTime;
+          } else if (currentTime - lastHumanDetectionTime > noHumanThreshold) {
+            humanPresenceDetected = false;
+            lastHumanDetectionTime = 0;
+            console.log('Human presence lost');
+          }
+        }
+
         if (noFaceDetectedDuration === 0) {
           noFaceDetectedDuration = currentTime;
         } else if (currentTime - noFaceDetectedDuration > NO_FACE_THRESHOLD) {
-          await createAlert('noFaceDetected', 0, currentTime - noFaceDetectedDuration);
+          // Only create alert if human was previously detected (distinguishes from no human present)
+          if (humanPresenceDetected) {
+            await createAlert('noFaceDetected', 0, currentTime - noFaceDetectedDuration);
+          }
           noFaceDetectedDuration = currentTime; // Reset to avoid spam
         }
 
@@ -542,7 +586,8 @@
           context.fillStyle = 'white';
           context.font = '24px Arial';
           context.textAlign = 'center';
-          context.fillText('NO FACE DETECTED', canvas.width / 2, canvas.height / 2);
+          context.fillText('NO FACE DETECTED', canvas.width / 2, canvas.height / 2 - 20);
+          context.fillText(humanPresenceDetected ? 'HUMAN PRESENT - LOOKING AWAY' : 'NO HUMAN DETECTED', canvas.width / 2, canvas.height / 2 + 20);
           context.textAlign = 'left';
         }
       }
@@ -558,7 +603,7 @@
     try {
       // Close existing connection if any
       if (wsConnection && wsConnection.readyState !== 3) { // 3 = CLOSED in WebSocket standard
-        wsConnection.close();
+          wsConnection.close();
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';

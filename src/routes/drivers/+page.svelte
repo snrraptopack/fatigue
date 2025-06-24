@@ -46,6 +46,7 @@
 
     function handleDriverSubmit(event: CustomEvent) {
         driverInfo = event.detail;
+        showModal = false;
         if (driverInfo) {
             connectWebSocket();
         }
