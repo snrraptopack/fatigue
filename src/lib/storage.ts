@@ -1,4 +1,3 @@
-
 import { get, set, del, keys } from 'idb-keyval';
 import { writable } from 'svelte/store';
 import { browser } from '$app/environment';
@@ -10,6 +9,8 @@ const DRIVERS_STORE = 'drivers';
 const VEHICLES_STORE = 'vehicles';
 const MODELS_STORE = 'face-api-models';
 const SYNC_METADATA = 'sync-metadata';
+const FLEET_DATA_STORE = 'fleet-data';
+const FLEET_SYNC_QUEUE = 'fleet-sync-queue';
 
 // Maximum size for image data URLs before compression (1MB)
 const MAX_IMAGE_SIZE = 1024 * 1024;
@@ -564,6 +565,169 @@ export async function processSyncQueue(wsConnection: WebSocket | null = null) {
     // Record sync failure
     await recordSyncAttempt(false, 0, 0, errorMessage);
 
+    throw error;
+  }
+}
+
+// Fleet data interface
+export interface FleetData {
+  id: string;
+  vehicleId: string;
+  driverId: string;
+  timestamp: number;
+  location?: { lat: number; lng: number; accuracy: number };
+  speed?: number;
+  heading?: number;
+  altitude?: number;
+  status: 'active' | 'idle' | 'maintenance' | 'offline';
+  fuelLevel?: number;
+  engineTemp?: number;
+  batteryLevel?: number;
+  synced: boolean;
+  createdAt: number;
+}
+
+// Fleet data functions
+export async function addFleetData(fleetData: FleetData): Promise<void> {
+  try {
+    // Get existing fleet data
+    const existingData = await get(FLEET_DATA_STORE) || [];
+    
+    // Add new data
+    const updatedData = [fleetData, ...existingData];
+    
+    // Keep only last 1000 records to prevent storage bloat
+    const trimmedData = updatedData.slice(0, 1000);
+    
+    await set(FLEET_DATA_STORE, trimmedData);
+    
+    // Add to sync queue if not already synced
+    if (!fleetData.synced) {
+      await addToFleetSyncQueue(fleetData);
+    }
+    
+    console.log('Fleet data saved locally:', fleetData.id);
+  } catch (error) {
+    console.error('Error saving fleet data:', error);
+    throw error;
+  }
+}
+
+export async function getAllFleetData(): Promise<FleetData[]> {
+  try {
+    const data = await get(FLEET_DATA_STORE);
+    return data || [];
+  } catch (error) {
+    console.error('Error getting fleet data:', error);
+    return [];
+  }
+}
+
+export async function getUnsyncedFleetData(): Promise<FleetData[]> {
+  try {
+    const allData = await getAllFleetData();
+    return allData.filter(data => !data.synced);
+  } catch (error) {
+    console.error('Error getting unsynced fleet data:', error);
+    return [];
+  }
+}
+
+export async function markFleetDataSynced(id: string): Promise<void> {
+  try {
+    const allData = await getAllFleetData();
+    const updatedData = allData.map(data => 
+      data.id === id ? { ...data, synced: true } : data
+    );
+    
+    await set(FLEET_DATA_STORE, updatedData);
+    
+    // Remove from sync queue
+    await removeFromFleetSyncQueue(id);
+  } catch (error) {
+    console.error('Error marking fleet data as synced:', error);
+    throw error;
+  }
+}
+
+async function addToFleetSyncQueue(fleetData: FleetData): Promise<void> {
+  try {
+    const queue = await get(FLEET_SYNC_QUEUE) || [];
+    
+    // Check if already in queue
+    const exists = queue.some(item => item.id === fleetData.id);
+    if (!exists) {
+      queue.unshift(fleetData);
+      
+      // Keep queue size manageable
+      const trimmedQueue = queue.slice(0, 500);
+      await set(FLEET_SYNC_QUEUE, trimmedQueue);
+    }
+  } catch (error) {
+    console.error('Error adding to fleet sync queue:', error);
+  }
+}
+
+async function removeFromFleetSyncQueue(id: string): Promise<void> {
+  try {
+    const queue = await get(FLEET_SYNC_QUEUE) || [];
+    const updatedQueue = queue.filter(item => item.id !== id);
+    await set(FLEET_SYNC_QUEUE, updatedQueue);
+  } catch (error) {
+    console.error('Error removing from fleet sync queue:', error);
+  }
+}
+
+export async function getFleetSyncQueue(): Promise<FleetData[]> {
+  try {
+    const queue = await get(FLEET_SYNC_QUEUE);
+    return queue || [];
+  } catch (error) {
+    console.error('Error getting fleet sync queue:', error);
+    return [];
+  }
+}
+
+export async function processFleetSyncQueue(): Promise<{ successCount: number; failCount: number; skippedCount: number }> {
+  try {
+    const queue = await getFleetSyncQueue();
+    
+    if (queue.length === 0) {
+      return { successCount: 0, failCount: 0, skippedCount: 0 };
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+    let skippedCount = 0;
+    let processedItems = [];
+
+    for (const fleetData of queue) {
+      try {
+        const response = await fetch('/api/admin/fleet', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(fleetData)
+        });
+
+        if (response.ok) {
+          successCount++;
+          processedItems.push(fleetData.id);
+          await markFleetDataSynced(fleetData.id);
+        } else {
+          failCount++;
+          console.error('Failed to sync fleet data:', response.statusText);
+        }
+      } catch (error) {
+        failCount++;
+        console.error('Error syncing fleet data:', error);
+      }
+    }
+
+    return { successCount, failCount, skippedCount };
+  } catch (error) {
+    console.error('Error processing fleet sync queue:', error);
     throw error;
   }
 }
