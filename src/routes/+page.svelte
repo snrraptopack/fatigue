@@ -523,56 +523,6 @@
     cursor: not-allowed;
   }
 
-  .fleet-container {
-    min-height: 400px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .fleet-placeholder {
-    text-align: center;
-    padding: 2rem;
-    background: #f8f9fa;
-    border-radius: 8px;
-    max-width: 500px;
-  }
-
-  .fleet-placeholder h3 {
-    color: #2c3e50;
-    margin-bottom: 1rem;
-  }
-
-  .fleet-placeholder p {
-    color: #6c757d;
-    margin-bottom: 2rem;
-  }
-
-  .fleet-stats {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .stat-item {
-    display: flex;
-    justify-content: space-between;
-    padding: 0.75rem;
-    background: white;
-    border-radius: 6px;
-    border-left: 4px solid #667eea;
-  }
-
-  .stat-label {
-    font-weight: 500;
-    color: #2c3e50;
-  }
-
-  .stat-value {
-    color: #6c757d;
-    font-family: 'Courier New', monospace;
-  }
-
   .network-actions {
     display: flex;
     gap: 1rem;

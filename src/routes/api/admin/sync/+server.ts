@@ -1,25 +1,18 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from '@sveltejs/kit';
-import { processSyncQueue, processFleetSyncQueue } from '$lib/storage';
+import { processSyncQueue, processDriverSyncQueue } from '$lib/storage';
 
 export const POST: RequestHandler = async () => {
   try {
     console.log('Manual sync triggered');
 
-    // Process both fatigue alerts and fleet data sync queues
-    const [alertSyncResult, fleetSyncResult] = await Promise.all([
-      processSyncQueue(),
-      processFleetSyncQueue()
-    ]);
-
-    const totalProcessed = alertSyncResult.successCount + fleetSyncResult.successCount;
-    const totalFailed = alertSyncResult.failCount + fleetSyncResult.failCount;
-    const totalSkipped = alertSyncResult.skippedCount + fleetSyncResult.skippedCount;
+    // Process both fatigue alerts and driver sync queues
+    const alertSyncResult = await processSyncQueue();
+    await processDriverSyncQueue();
 
     console.log('Manual sync completed:', {
-      alerts: alertSyncResult,
-      fleet: fleetSyncResult,
-      total: { processed: totalProcessed, failed: totalFailed, skipped: totalSkipped }
+      alerts: alertSyncResult || { successCount: 0, failCount: 0, skippedCount: 0 },
+      drivers: 'processed'
     });
 
     return json({
@@ -27,11 +20,11 @@ export const POST: RequestHandler = async () => {
       message: 'Manual sync completed successfully',
       results: {
         alerts: alertSyncResult,
-        fleet: fleetSyncResult,
+        drivers: 'Driver sync queue processed',
         summary: {
-          totalProcessed,
-          totalFailed,
-          totalSkipped
+          totalProcessed: alertSyncResult?.successCount || 0,
+          totalFailed: alertSyncResult?.failCount || 0,
+          totalSkipped: alertSyncResult?.skippedCount || 0
         }
       }
     });
@@ -53,7 +46,7 @@ export const GET: RequestHandler = async () => {
       endpoints: {
         manual: 'POST /api/admin/sync',
         alerts: 'GET /api/admin/alerts',
-        fleet: 'GET /api/admin/fleet'
+        drivers: 'GET /api/admin/drivers'
       }
     });
   } catch (error) {

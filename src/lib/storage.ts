@@ -1,4 +1,4 @@
-import { get, set, del, keys } from 'idb-keyval';
+﻿import { get, set } from 'idb-keyval';
 import { writable } from 'svelte/store';
 import { browser } from '$app/environment';
 import { networkStatus } from './network';
@@ -9,8 +9,6 @@ const DRIVERS_STORE = 'drivers';
 const VEHICLES_STORE = 'vehicles';
 const MODELS_STORE = 'face-api-models';
 const SYNC_METADATA = 'sync-metadata';
-const FLEET_DATA_STORE = 'fleet-data';
-const FLEET_SYNC_QUEUE = 'fleet-sync-queue';
 
 // Maximum size for image data URLs before compression (1MB)
 const MAX_IMAGE_SIZE = 1024 * 1024;
@@ -243,7 +241,7 @@ export async function getAllAlerts() {
 export async function getUnsyncedAlerts() {
   try {
     const alerts = await getAllAlerts();
-    return alerts.filter(alert => !alert.synced);
+    return alerts.filter((alert: FatigueAlert) => !alert.synced);
   } catch (error) {
     console.error('Error getting unsynced alerts:', error);
     return [];
@@ -276,7 +274,7 @@ export async function addAlert(alert: FatigueAlert) {
     const alerts = await getAllAlerts();
 
     // Check if alert with this ID already exists
-    const existingIndex = alerts.findIndex(a => a.id === alert.id);
+    const existingIndex = alerts.findIndex((a: FatigueAlert) => a.id === alert.id);
 
     if (existingIndex >= 0) {
       // Update existing alert
@@ -492,7 +490,7 @@ export async function processSyncQueue(wsConnection: WebSocket | null = null) {
     if (successCount > 0) {
       // Mark synced alerts
       const alerts = await getAllAlerts();
-      const updatedAlerts = alerts.map(alert => {
+      const updatedAlerts = alerts.map((alert: FatigueAlert) => {
         if (processedItems.includes(alert.id)) {
           return { ...alert, synced: true };
         }
@@ -502,7 +500,7 @@ export async function processSyncQueue(wsConnection: WebSocket | null = null) {
       await set(ALERTS_STORE, updatedAlerts);
 
       // Remove synced items from queue
-      const newQueue = queue.filter(alert => !processedItems.includes(alert.id));
+      const newQueue = queue.filter((alert: FatigueAlert) => !processedItems.includes(alert.id));
       await set(SYNC_QUEUE, newQueue);
     }
 
@@ -569,165 +567,253 @@ export async function processSyncQueue(wsConnection: WebSocket | null = null) {
   }
 }
 
-// Fleet data interface
-export interface FleetData {
+// Driver registration interface extending DriverProfile
+export interface DriverRegistration {
   id: string;
+  name: string;
   vehicleId: string;
-  driverId: string;
-  timestamp: number;
+  uniqueDriverId: string; // Combined identifier for consistency
+  registeredAt: number;
+  lastSeen: number;
+  status: 'active' | 'inactive' | 'break' | 'offline';
+  shift?: {
+    start: number;
+    end: number;
+  };
   location?: { lat: number; lng: number; accuracy: number };
-  speed?: number;
-  heading?: number;
-  altitude?: number;
-  status: 'active' | 'idle' | 'maintenance' | 'offline';
-  fuelLevel?: number;
-  engineTemp?: number;
-  batteryLevel?: number;
+  photo?: string;
   synced: boolean;
   createdAt: number;
 }
 
-// Fleet data functions
-export async function addFleetData(fleetData: FleetData): Promise<void> {
+// Driver registration functions
+export async function registerDriver(driverInfo: {
+  driverName: string;
+  driverId: string;
+  uniqueDriverId: string;
+}): Promise<DriverRegistration> {
   try {
-    // Get existing fleet data
-    const existingData = await get(FLEET_DATA_STORE) || [];
-    
-    // Add new data
-    const updatedData = [fleetData, ...existingData];
-    
-    // Keep only last 1000 records to prevent storage bloat
-    const trimmedData = updatedData.slice(0, 1000);
-    
-    await set(FLEET_DATA_STORE, trimmedData);
-    
-    // Add to sync queue if not already synced
-    if (!fleetData.synced) {
-      await addToFleetSyncQueue(fleetData);
-    }
-    
-    console.log('Fleet data saved locally:', fleetData.id);
-  } catch (error) {
-    console.error('Error saving fleet data:', error);
-    throw error;
-  }
-}
+    const registration: DriverRegistration = {
+      id: crypto.randomUUID(),
+      name: driverInfo.driverName,
+      vehicleId: driverInfo.driverId,
+      uniqueDriverId: driverInfo.uniqueDriverId,
+      registeredAt: Date.now(),
+      lastSeen: Date.now(),
+      status: 'active',
+      synced: false,
+      createdAt: Date.now()
+    };
 
-export async function getAllFleetData(): Promise<FleetData[]> {
-  try {
-    const data = await get(FLEET_DATA_STORE);
-    return data || [];
-  } catch (error) {
-    console.error('Error getting fleet data:', error);
-    return [];
-  }
-}
-
-export async function getUnsyncedFleetData(): Promise<FleetData[]> {
-  try {
-    const allData = await getAllFleetData();
-    return allData.filter(data => !data.synced);
-  } catch (error) {
-    console.error('Error getting unsynced fleet data:', error);
-    return [];
-  }
-}
-
-export async function markFleetDataSynced(id: string): Promise<void> {
-  try {
-    const allData = await getAllFleetData();
-    const updatedData = allData.map(data => 
-      data.id === id ? { ...data, synced: true } : data
+    // Get existing drivers
+    const existingDrivers = await get(DRIVERS_STORE) || [];
+    
+    // Check if driver already exists (by uniqueDriverId)
+    const existingDriverIndex = existingDrivers.findIndex(
+      (d: DriverRegistration) => d.uniqueDriverId === registration.uniqueDriverId
     );
-    
-    await set(FLEET_DATA_STORE, updatedData);
-    
-    // Remove from sync queue
-    await removeFromFleetSyncQueue(id);
+
+    if (existingDriverIndex >= 0) {
+      // Update existing driver
+      existingDrivers[existingDriverIndex] = {
+        ...existingDrivers[existingDriverIndex],
+        lastSeen: Date.now(),
+        status: 'active',
+        synced: false // Mark as needing sync
+      };
+      await set(DRIVERS_STORE, existingDrivers);
+      
+      // Add to sync queue
+      await addToDriverSyncQueue(existingDrivers[existingDriverIndex]);
+      
+      console.log('Driver updated:', registration.uniqueDriverId);
+      return existingDrivers[existingDriverIndex];
+    } else {
+      // Add new driver
+      const updatedDrivers = [registration, ...existingDrivers];
+      await set(DRIVERS_STORE, updatedDrivers);
+      
+      // Add to sync queue
+      await addToDriverSyncQueue(registration);
+      
+      console.log('New driver registered:', registration.uniqueDriverId);
+      return registration;
+    }
   } catch (error) {
-    console.error('Error marking fleet data as synced:', error);
+    console.error('Error registering driver:', error);
     throw error;
   }
 }
 
-async function addToFleetSyncQueue(fleetData: FleetData): Promise<void> {
+export async function updateDriverStatus(
+  uniqueDriverId: string, 
+  updates: Partial<DriverRegistration>
+): Promise<void> {
   try {
-    const queue = await get(FLEET_SYNC_QUEUE) || [];
-    
-    // Check if already in queue
-    const exists = queue.some(item => item.id === fleetData.id);
-    if (!exists) {
-      queue.unshift(fleetData);
+    const drivers = await get(DRIVERS_STORE) || [];
+    const driverIndex = drivers.findIndex(
+      (d: DriverRegistration) => d.uniqueDriverId === uniqueDriverId
+    );
+
+    if (driverIndex >= 0) {
+      drivers[driverIndex] = {
+        ...drivers[driverIndex],
+        ...updates,
+        lastSeen: Date.now(),
+        synced: false // Mark as needing sync
+      };
       
-      // Keep queue size manageable
-      const trimmedQueue = queue.slice(0, 500);
-      await set(FLEET_SYNC_QUEUE, trimmedQueue);
+      await set(DRIVERS_STORE, drivers);
+      await addToDriverSyncQueue(drivers[driverIndex]);
+      
+      console.log('Driver status updated:', uniqueDriverId);
     }
   } catch (error) {
-    console.error('Error adding to fleet sync queue:', error);
+    console.error('Error updating driver status:', error);
+    throw error;
   }
 }
 
-async function removeFromFleetSyncQueue(id: string): Promise<void> {
+export async function getDriverByUniqueId(uniqueDriverId: string): Promise<DriverRegistration | null> {
   try {
-    const queue = await get(FLEET_SYNC_QUEUE) || [];
-    const updatedQueue = queue.filter(item => item.id !== id);
-    await set(FLEET_SYNC_QUEUE, updatedQueue);
+    const drivers = await get(DRIVERS_STORE) || [];
+    return drivers.find((d: DriverRegistration) => d.uniqueDriverId === uniqueDriverId) || null;
   } catch (error) {
-    console.error('Error removing from fleet sync queue:', error);
+    console.error('Error getting driver:', error);
+    return null;
   }
 }
 
-export async function getFleetSyncQueue(): Promise<FleetData[]> {
+export async function getAllDrivers(): Promise<DriverRegistration[]> {
   try {
-    const queue = await get(FLEET_SYNC_QUEUE);
-    return queue || [];
+    const drivers = await get(DRIVERS_STORE) || [];
+    return drivers;
   } catch (error) {
-    console.error('Error getting fleet sync queue:', error);
+    console.error('Error getting all drivers:', error);
     return [];
   }
 }
 
-export async function processFleetSyncQueue(): Promise<{ successCount: number; failCount: number; skippedCount: number }> {
+// Driver sync queue functions
+const DRIVER_SYNC_QUEUE = 'driver-sync-queue';
+
+async function addToDriverSyncQueue(driver: DriverRegistration): Promise<void> {
   try {
-    const queue = await getFleetSyncQueue();
+    const queue = await get(DRIVER_SYNC_QUEUE) || [];
     
-    if (queue.length === 0) {
-      return { successCount: 0, failCount: 0, skippedCount: 0 };
-    }
+    // Remove existing entry for this driver if exists
+    const filteredQueue = queue.filter((item: any) => item.uniqueDriverId !== driver.uniqueDriverId);
+    
+    // Add updated driver to queue
+    filteredQueue.push({
+      ...driver,
+      queuedAt: Date.now()
+    });
+    
+    await set(DRIVER_SYNC_QUEUE, filteredQueue);
+    
+    // Update sync status
+    const syncQueue = await get(DRIVER_SYNC_QUEUE) || [];
+    syncStatus.update(status => ({
+      ...status,
+      pendingCount: status.pendingCount + syncQueue.length
+    }));
+  } catch (error) {
+    console.error('Error adding driver to sync queue:', error);
+  }
+}
 
-    let successCount = 0;
-    let failCount = 0;
-    let skippedCount = 0;
-    let processedItems = [];
+export async function getUnsyncedDrivers(): Promise<DriverRegistration[]> {
+  try {
+    const queue = await get(DRIVER_SYNC_QUEUE) || [];
+    return queue;
+  } catch (error) {
+    console.error('Error getting unsynced drivers:', error);
+    return [];
+  }
+}
 
-    for (const fleetData of queue) {
+export async function processDriverSyncQueue(): Promise<void> {
+  if (!browser) return;
+
+  try {
+    const queue = await getUnsyncedDrivers();
+    if (queue.length === 0) return;
+
+    console.log(`Processing ${queue.length} drivers in sync queue`);
+
+    for (const driver of queue) {
       try {
-        const response = await fetch('/api/admin/fleet', {
+        // Send driver to server
+        const response = await fetch('/api/admin/drivers', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify(fleetData)
+          body: JSON.stringify({
+            driverId: driver.uniqueDriverId,
+            updates: {
+              name: driver.name,
+              vehicleId: driver.vehicleId,
+              status: driver.status,
+              lastSeen: driver.lastSeen,
+              registeredAt: driver.registeredAt,
+              shift: driver.shift,
+              location: driver.location,
+              photo: driver.photo
+            }
+          })
         });
 
         if (response.ok) {
-          successCount++;
-          processedItems.push(fleetData.id);
-          await markFleetDataSynced(fleetData.id);
+          // Mark as synced in local storage
+          await updateDriverSyncedStatus(driver.uniqueDriverId, true);
+          
+          // Remove from sync queue
+          await removeFromDriverSyncQueue(driver.uniqueDriverId);
+          
+          console.log('Driver synced successfully:', driver.uniqueDriverId);
         } else {
-          failCount++;
-          console.error('Failed to sync fleet data:', response.statusText);
+          console.error('Failed to sync driver:', driver.uniqueDriverId, response.status);
         }
       } catch (error) {
-        failCount++;
-        console.error('Error syncing fleet data:', error);
+        console.error('Error syncing driver:', driver.uniqueDriverId, error);
       }
     }
 
-    return { successCount, failCount, skippedCount };
+    // Update sync status
+    const remainingQueue = await getUnsyncedDrivers();
+    syncStatus.update(status => ({
+      ...status,
+      pendingCount: status.pendingCount + remainingQueue.length
+    }));
   } catch (error) {
-    console.error('Error processing fleet sync queue:', error);
-    throw error;
+    console.error('Error processing driver sync queue:', error);
+  }
+}
+
+async function updateDriverSyncedStatus(uniqueDriverId: string, synced: boolean): Promise<void> {
+  try {
+    const drivers = await get(DRIVERS_STORE) || [];
+    const driverIndex = drivers.findIndex(
+      (d: DriverRegistration) => d.uniqueDriverId === uniqueDriverId
+    );
+
+    if (driverIndex >= 0) {
+      drivers[driverIndex].synced = synced;
+      await set(DRIVERS_STORE, drivers);
+    }
+  } catch (error) {
+    console.error('Error updating driver synced status:', error);
+  }
+}
+
+async function removeFromDriverSyncQueue(uniqueDriverId: string): Promise<void> {
+  try {
+    const queue = await get(DRIVER_SYNC_QUEUE) || [];
+    const filteredQueue = queue.filter((item: any) => item.uniqueDriverId !== uniqueDriverId);
+    await set(DRIVER_SYNC_QUEUE, filteredQueue);
+  } catch (error) {
+    console.error('Error removing driver from sync queue:', error);
   }
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
+    import { registerDriver } from '$lib/storage';
 
     export let showModal = false;
 
@@ -8,7 +9,7 @@
 
     const dispatch = createEventDispatcher();
 
-    function handleSubmit() {
+    async function handleSubmit() {
         if (driverName && driverId) {
             // Normalize the driver ID to ensure consistency
             const normalizedId = driverId.trim().toUpperCase();
@@ -17,18 +18,38 @@
             // This ensures we can identify the same driver across sessions
             const uniqueDriverId = `${driverName.toLowerCase().replace(/\s+/g, '-')}-${normalizedId}`;
 
-            dispatch('submit', { 
-                driverName: driverName.trim(), 
-                driverId: normalizedId,
-                uniqueDriverId
-            });
+            try {
+                // Register driver in IndexedDB and queue for sync
+                const registration = await registerDriver({
+                    driverName: driverName.trim(),
+                    driverId: normalizedId,
+                    uniqueDriverId
+                });
 
-            showModal = false;
+                dispatch('submit', { 
+                    driverName: registration.name, 
+                    driverId: registration.vehicleId,
+                    uniqueDriverId: registration.uniqueDriverId
+                });
 
-            // Store in localStorage for future sessions
-            if (typeof localStorage !== 'undefined') {
-                localStorage.setItem('driver-name', driverName.trim());
-                localStorage.setItem('driver-id', normalizedId);
+                showModal = false;
+
+                // Store in localStorage for future sessions (backwards compatibility)
+                if (typeof localStorage !== 'undefined') {
+                    localStorage.setItem('driver-name', driverName.trim());
+                    localStorage.setItem('driver-id', normalizedId);
+                }
+
+                console.log('Driver registered successfully:', registration.uniqueDriverId);
+            } catch (error) {
+                console.error('Failed to register driver:', error);
+                // Still dispatch the event for UI consistency
+                dispatch('submit', { 
+                    driverName: driverName.trim(), 
+                    driverId: normalizedId,
+                    uniqueDriverId
+                });
+                showModal = false;
             }
         }
     }

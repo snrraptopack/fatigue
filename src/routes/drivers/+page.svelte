@@ -4,7 +4,7 @@
     import SnapshotGallery from '../../lib/component/SnapshotGallery.svelte';
     import { onMount, onDestroy } from 'svelte';
     import { browser } from '$app/environment';
-    import { syncStatus, processSyncQueue, getUnsyncedAlerts } from '$lib/storage';
+    import { syncStatus, processSyncQueue, getUnsyncedAlerts, getDriverByUniqueId, processDriverSyncQueue } from '$lib/storage';
 
     let showModal = true;
     let driverInfo: { driverName: string, driverId: string, uniqueDriverId: string } | null = null;
@@ -247,7 +247,38 @@
         streamActive = false;
     }
 
-    onMount(() => {
+    onMount(async () => {
+        // Check if driver info exists in localStorage first, then IndexedDB
+        if (browser) {
+            const savedDriverName = localStorage.getItem('driver-name');
+            const savedDriverId = localStorage.getItem('driver-id');
+            
+            if (savedDriverName && savedDriverId) {
+                // Create driver info from saved data
+                const uniqueDriverId = `${savedDriverName.toLowerCase().replace(/\s+/g, '-')}-${savedDriverId}`;
+                
+                // Check if driver exists in IndexedDB
+                const existingDriver = await getDriverByUniqueId(uniqueDriverId);
+                
+                if (existingDriver) {
+                    // Use existing driver data from IndexedDB
+                    driverInfo = {
+                        driverName: existingDriver.name,
+                        driverId: existingDriver.vehicleId,
+                        uniqueDriverId: existingDriver.uniqueDriverId
+                    };
+                } else {
+                    // Create new driver info from localStorage
+                    driverInfo = {
+                        driverName: savedDriverName,
+                        driverId: savedDriverId,
+                        uniqueDriverId
+                    };
+                }
+                showModal = false;
+            }
+        }
+
         if (driverInfo) {
             connectWebSocket();
         }
@@ -255,6 +286,22 @@
         // Listen for fatigue alerts from the FatigueDetector component
         if (browser) {
             window.addEventListener('fatigue-alert', handleFatigueAlert as EventListener);
+        }
+
+        // Start automatic sync processes
+        if (browser) {
+            // Process pending sync queues
+            processSyncQueue();
+            processDriverSyncQueue();
+            
+            // Set up periodic sync
+            const syncInterval = setInterval(() => {
+                processSyncQueue();
+                processDriverSyncQueue();
+            }, 30000); // Sync every 30 seconds
+
+            // Clean up interval on destroy
+            return () => clearInterval(syncInterval);
         }
     });
 
